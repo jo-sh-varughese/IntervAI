@@ -15,12 +15,10 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 
-# Plotly (interactive, dark theme) + static export via kaleido
+# Plotly (interactive, dark theme)
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
-
-
 
 # Optional: voice input (works locally; typically disabled in cloud)
 try:
@@ -52,6 +50,10 @@ st.markdown(
       .metric { text-align: center; }
       .badge { background:#1f2937; padding:6px 10px; border-radius:12px; margin-right:8px; font-size:12px; color:#e8eaed;}
       .section-title { font-size: 1.1rem; font-weight: 600; margin: 0.4rem 0 0.2rem; }
+      /* nicer inputs */
+      div[data-baseweb="input"] input { background: #111418 !important; color: #e8eaed !important; }
+      .stTextInput > div > div input { background: #111418 !important; color: #e8eaed !important; }
+      .stTextArea textarea { background: #111418 !important; color: #e8eaed !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -358,21 +360,39 @@ for m in st.session_state.conversation:
     with st.chat_message(m["role"]):
         st.write(m["content"])
 
-# Input Row
-input_cols = st.columns([4,1])
-user_answer = input_cols[0].chat_input("Your answer…")
-if VOICE_INPUT and sr is not None and input_cols[1].button("🎤 Speak"):
-    try:
-        r = sr.Recognizer()
-        with sr.Microphone() as source:
-            st.info("Listening…")
-            audio = r.listen(source, timeout=5, phrase_time_limit=30)
-        user_answer = r.recognize_google(audio)
-        st.success(f"You said: {user_answer}")
-    except Exception as e:
-        st.warning(f"Voice input error: {e}")
 
-if user_answer:
+# =========================
+# Answer Input (Always visible & speech-capable)
+# =========================
+st.markdown("### 💬 Your Answer")
+
+answer_cols = st.columns([5, 1])
+user_answer = answer_cols[0].text_input(
+    "Type your answer here 👇",
+    placeholder="Type your response...",
+    key=f"user_answer_{st.session_state.question_count}"
+)
+
+voice_answer = None
+if VOICE_INPUT and sr is not None:
+    with answer_cols[1]:
+        if st.button("🎙️ Speak", use_container_width=True):
+            try:
+                r = sr.Recognizer()
+                with sr.Microphone() as source:
+                    st.info("🎧 Listening... please speak clearly.")
+                    audio = r.listen(source, timeout=5, phrase_time_limit=20)
+                voice_answer = r.recognize_google(audio)
+                st.success(f"🗣️ You said: {voice_answer}")
+                user_answer = voice_answer
+            except Exception as e:
+                st.warning(f"⚠️ Voice input error: {e}")
+else:
+    if not VOICE_AVAILABLE:
+        st.caption("🎙️ Voice input disabled in cloud environment.")
+
+submit_col = st.columns([1,6,1])[0]
+if user_answer and submit_col.button("➡️ Submit Answer"):
     # Store user answer
     st.session_state.conversation.append({"role": "user", "content": user_answer})
 
@@ -404,6 +424,7 @@ if user_answer:
         st.session_state.interview_done = True
 
     st.rerun()
+
 
 # =========================
 # Analytics (Interactive Plotly)
@@ -473,6 +494,43 @@ if st.session_state.scores:
     c5.metric("Depth", f"{mean_crit.get('depth', 0):.1f}/10")
 
 # =========================
+# Helpers for PDF Encoding & Images (no crashes)
+# =========================
+def clean_text(text: str) -> str:
+    """Sanitize strings so FPDF (latin-1) won't crash on Unicode."""
+    if not isinstance(text, str):
+        text = str(text)
+    replacements = {
+        "—": "-", "–": "-", "…": "...", "‘": "'", "’": "'",
+        "“": '"', "”": '"', "•": "-", "→": "->", "✅": "[OK]", "🤖": "[AI]"
+    }
+    for k, v in replacements.items():
+        text = text.replace(k, v)
+    # Replace any remaining non-ASCII with space
+    return re.sub(r'[^\x00-\x7F]+', ' ', text)
+
+def fig_to_temp_png(fig):
+    """
+    Try to export a Plotly figure to a temporary PNG file.
+    Attempts fig.to_image() first (modern), then fig.write_image().
+    Returns (path or None, error_message or None)
+    """
+    try:
+        png_bytes = fig.to_image(format="png")  # may require kaleido; works on many local installs
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        tmp.write(png_bytes)
+        tmp.flush(); tmp.close()
+        return tmp.name, None
+    except Exception as e1:
+        try:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            fig.write_image(tmp.name)  # fallback if available
+            tmp.flush(); tmp.close()
+            return tmp.name, None
+        except Exception as e2:
+            return None, f"{e1} | {e2}"
+
+# =========================
 # PDF Report Generation
 # =========================
 st.markdown("---")
@@ -493,47 +551,50 @@ def generate_pdf_report(name, role, seniority, personality, avg_total, mean_crit
 
     # Header
     pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(0, 10, "IntervAI Interview Report", ln=True, align="C")
+    pdf.cell(0, 10, clean_text("IntervAI Interview Report"), ln=True, align="C")
     pdf.ln(8)
 
     # Candidate Info
     pdf.set_font("Helvetica", "", 12)
-    pdf.cell(0, 8, f"Candidate Name: {name}", ln=True)
-    pdf.cell(0, 8, f"Role: {role} ({seniority})", ln=True)
-    pdf.cell(0, 8, f"Interviewer Type: {personality}", ln=True)
+    pdf.cell(0, 8, clean_text(f"Candidate Name: {name}"), ln=True)
+    pdf.cell(0, 8, clean_text(f"Role: {role} ({seniority})"), ln=True)
+    pdf.cell(0, 8, clean_text(f"Interviewer Type: {personality}"), ln=True)
     pdf.ln(5)
 
     # Average Metrics
     pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 10, "Overall Evaluation:", ln=True)
+    pdf.cell(0, 10, clean_text("Overall Evaluation:"), ln=True)
     pdf.set_font("Helvetica", "", 12)
-    pdf.cell(0, 8, f"Average Score: {avg_total}/10", ln=True)
-    pdf.cell(0, 8, f"Correctness: {mean_crit.get('correctness',0):.1f}/10", ln=True)
-    pdf.cell(0, 8, f"Clarity: {mean_crit.get('clarity',0):.1f}/10", ln=True)
-    pdf.cell(0, 8, f"Relevance: {mean_crit.get('relevance',0):.1f}/10", ln=True)
-    pdf.cell(0, 8, f"Depth: {mean_crit.get('depth',0):.1f}/10", ln=True)
+    pdf.cell(0, 8, clean_text(f"Average Score: {avg_total}/10"), ln=True)
+    pdf.cell(0, 8, clean_text(f"Correctness: {mean_crit.get('correctness',0):.1f}/10"), ln=True)
+    pdf.cell(0, 8, clean_text(f"Clarity: {mean_crit.get('clarity',0):.1f}/10"), ln=True)
+    pdf.cell(0, 8, clean_text(f"Relevance: {mean_crit.get('relevance',0):.1f}/10"), ln=True)
+    pdf.cell(0, 8, clean_text(f"Depth: {mean_crit.get('depth',0):.1f}/10"), ln=True)
     pdf.ln(8)
 
-    # Save charts to temp files and embed
+    # Save charts to temp files and embed (robust, Chrome-free path)
     temp_files = []
     for fig, title in figs:
-        # Save chart as PNG
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-        fig.write_image(tmp.name)  # requires kaleido
         pdf.set_font("Helvetica", "B", 12)
-        pdf.cell(0, 8, title, ln=True)
-        pdf.image(tmp.name, w=180)
+        pdf.cell(0, 8, clean_text(title), ln=True)
+        img_path, err = fig_to_temp_png(fig)
+        if img_path:
+            pdf.image(img_path, w=180)
+            temp_files.append(img_path)
+        else:
+            pdf.set_font("Helvetica", "I", 11)
+            pdf.multi_cell(0, 6, clean_text(f"(Chart unavailable: {err})"))
         pdf.ln(6)
-        temp_files.append(tmp.name)
 
     # Footer
     pdf.set_font("Helvetica", "I", 10)
     pdf.ln(6)
-    pdf.multi_cell(0, 6, "Generated by IntervAI — AI-powered interview assistant.\nhttps://github.com")
+    pdf.multi_cell(0, 6, clean_text("Generated by IntervAI - AI-powered interview assistant."))
 
     # Output
     out_path = os.path.join(tempfile.gettempdir(), f"{name.replace(' ', '_')}_IntervAI_Report.pdf")
     pdf.output(out_path)
+
     return out_path, temp_files
 
 if st.button("🧾 Generate PDF Report"):
@@ -649,4 +710,4 @@ with exp_col2:
 
 # Footer
 st.markdown("---")
-st.caption("IntervAI • Smart. Fair. Human. • Built with Streamlit, Gemini, Plotly & Kaleido (dark mode).")
+st.caption("IntervAI • Smart. Fair. Human. • Built with Streamlit, Gemini & Plotly (dark mode).")
