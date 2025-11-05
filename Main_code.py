@@ -1,8 +1,12 @@
+# Main_code.py
+# IntervAI — Professional AI Interviewer (Dark theme, Plotly, PDF report)
+
 import os
 import re
 import json
 import threading
 import platform
+import tempfile
 from typing import Dict, List
 
 import streamlit as st
@@ -11,11 +15,11 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 
-# Plotly (dark theme)
+# Plotly (interactive, dark theme) + static export via kaleido
 import plotly.express as px
 import plotly.graph_objects as go
 
-# Optional voice/speech (auto-disabled on cloud)
+# Optional: voice input (works locally; typically disabled in cloud)
 try:
     import speech_recognition as sr
 except Exception:
@@ -24,8 +28,9 @@ except Exception:
 # =========================
 # App + Model Configuration
 # =========================
-PLOTLY_TEMPLATE = "plotly_dark"   # dark theme for interactive charts
-MODEL_NAME = "gemini-2.5-flash"   # widely available + fast/cost-efficient
+PLOTLY_TEMPLATE = "plotly_dark"          # dark theme for all charts
+MODEL_NAME = "gemini-2.5-flash"          # fast, widely available
+MAX_RESUME_CHARS = 6000                   # safe token budget for resume context
 
 load_dotenv()
 API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -36,13 +41,14 @@ st.set_page_config(
     layout="wide"
 )
 
+# Simple dark CSS touch-ups
 st.markdown(
     """
     <style>
-    .stApp { background-color: #0e1117; }
-    .css-10trblm, .css-1v3fvcr, h1, h2, h3, p, span, div { color: #e8eaed !important; }
-    .metric { text-align: center; }
-    .badge { background:#1f2937; padding:6px 10px; border-radius:12px; margin-right:8px; font-size:12px; }
+      .stApp { background-color: #0e1117; }
+      .metric { text-align: center; }
+      .badge { background:#1f2937; padding:6px 10px; border-radius:12px; margin-right:8px; font-size:12px; color:#e8eaed;}
+      .section-title { font-size: 1.1rem; font-weight: 600; margin: 0.4rem 0 0.2rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -54,13 +60,13 @@ st.markdown(
 colA, colB = st.columns([0.7, 0.3])
 with colA:
     st.title("🤖 IntervAI — Professional AI Interviewer")
-    st.caption("Dynamic, resume-aware, feedback-driven interviews — with interactive analytics in dark mode.")
+    st.caption("Dynamic, resume-aware interviewing • Real-time feedback • Interactive analytics • PDF reporting (dark mode)")
 with colB:
     st.markdown(
         "<div style='text-align:right;'>"
         "<span class='badge'>Adaptive Q&A</span>"
         "<span class='badge'>Resume Intelligence</span>"
-        "<span class='badge'>Real-time Scoring</span>"
+        "<span class='badge'>Scoring & Criteria</span>"
         "<span class='badge'>Plotly Analytics</span>"
         "</div>",
         unsafe_allow_html=True,
@@ -80,11 +86,12 @@ jd = st.sidebar.text_area(
 temperature = st.sidebar.slider("AI Creativity", 0.0, 1.0, 0.3, 0.05)
 max_questions = st.sidebar.slider("Max Questions", 3, 15, 7)
 
-# Resume upload
+candidate_name = st.sidebar.text_input("Candidate Name (for PDF/report)", "John Doe")
+
 uploaded_file = st.sidebar.file_uploader("📄 Upload Candidate Resume (PDF)", type=["pdf"])
 
 # =========================
-# Initialize Model (Gemini)
+# Initialize Gemini
 # =========================
 if not API_KEY:
     st.error("❌ Add your Gemini API key in `.env` as `GOOGLE_API_KEY=...`")
@@ -98,7 +105,7 @@ except Exception as e:
     st.stop()
 
 # =========================
-# Resume Parsing
+# Resume Parsing & Summary
 # =========================
 resume_text = ""
 if uploaded_file is not None:
@@ -120,7 +127,7 @@ if resume_text.strip():
       "skills": ["skill1","skill2","skill3", "..."]
     }}
     Resume:
-    {resume_text[:6000]}
+    {resume_text[:MAX_RESUME_CHARS]}
     """
     try:
         resp = model.generate_content(skill_prompt, generation_config={"temperature": 0.1})
@@ -137,7 +144,7 @@ else:
     st.sidebar.info("Upload a resume for deeper personalization (optional).")
 
 # =========================
-# State
+# Session State
 # =========================
 if "conversation" not in st.session_state:
     st.session_state.conversation: List[Dict] = []  # [{role, content}]
@@ -159,11 +166,12 @@ try:
     if "streamlit" in platform.node().lower() or os.environ.get("STREAMLIT_RUNTIME"):
         VOICE_AVAILABLE = False  # Streamlit Cloud: no TTS stack
     else:
-        # pyttsx3 optional local TTS
+        # Optional local TTS via pyttsx3
         try:
             import pyttsx3
             engine = pyttsx3.init()
             engine.setProperty("rate", 165)
+
             def speak(text: str):
                 def _run():
                     try:
@@ -181,16 +189,15 @@ try:
             def speak(text: str): pass
     else:
         def speak(text: str): pass
-        st.sidebar.info("🔇 Voice disabled in cloud / headless environments.")
+        st.sidebar.info("🔇 Voice disabled in cloud/headless environments.")
 except Exception:
     def speak(text: str): pass
     st.sidebar.info("🔇 Voice disabled.")
 
-# Optional speech input (microphone rarely available on cloud)
+# Optional speech input (microphone usually unavailable on cloud)
 VOICE_INPUT = False
 if sr is not None and VOICE_AVAILABLE:
     VOICE_INPUT = st.sidebar.toggle("🎙️ Voice input (local)", value=False)
-
 
 # =========================
 # Prompt Policies
@@ -239,7 +246,7 @@ Return ONLY the question text.
 def evaluate_answer(question: str, answer: str) -> Dict:
     """
     Robust evaluator: returns {"score": int, "feedback": str, "criteria": {...}}
-    With regex/guarded fallback if JSON parsing fails.
+    Includes regex/guarded fallback if JSON parsing fails.
     """
     eval_prompt = f"""
 You are evaluating a candidate's answer.
@@ -289,12 +296,11 @@ Respond STRICT JSON only:
                         pass
 
             # Feedback fallback
-            fb = "Thanks. Add more specifics (metrics, constraints, trade-offs)."
+            fb = "Good start—add concrete examples, metrics, and trade-offs."
             mf = re.search(r'"?feedback"?\s*[:\-]\s*"(.*?)"', raw, re.I | re.S)
             if mf:
                 fb = mf.group(1).strip()
             else:
-                # Try to extract anything after "feedback" word
                 mf2 = re.search(r'feedback[:\-]\s*(.+)', raw, re.I)
                 if mf2:
                     fb = mf2.group(1).strip()
@@ -312,7 +318,7 @@ Respond STRICT JSON only:
         }
         data["criteria"] = criteria
         if not data.get("feedback"):
-            data["feedback"] = "Good start—add concrete examples, metrics, and trade-offs next time."
+            data["feedback"] = "Thanks. Add specifics (metrics, constraints, trade-offs)."
         return data
 
     except Exception as e:
@@ -323,7 +329,7 @@ Respond STRICT JSON only:
         }
 
 # =========================
-# UI: Interview Flow
+# UI: Top Controls & Chat
 # =========================
 top_controls = st.columns([1,1,2,2])
 with top_controls[0]:
@@ -337,7 +343,6 @@ with top_controls[0]:
 with top_controls[1]:
     if st.button("Ask Next Question ▶️", disabled=st.session_state.interview_done):
         if st.session_state.question_count == 0:
-            # Greet then ask first
             greet = f"I’m your {personality} interviewer for the {role} role. Let’s begin."
             st.session_state.conversation.append({"role": "assistant", "content": greet})
         q = next_question()
@@ -345,7 +350,7 @@ with top_controls[1]:
         st.session_state.question_count += 1
         speak(q)
 
-# Chat History
+# Chat history
 for m in st.session_state.conversation:
     with st.chat_message(m["role"]):
         st.write(m["content"])
@@ -369,7 +374,6 @@ if user_answer:
     st.session_state.conversation.append({"role": "user", "content": user_answer})
 
     # Evaluate
-    # find the last assistant question
     question_text = ""
     for msg in reversed(st.session_state.conversation[:-1]):
         if msg["role"] == "assistant":
@@ -399,13 +403,19 @@ if user_answer:
     st.rerun()
 
 # =========================
-# Analytics & Exports
+# Analytics (Interactive Plotly)
 # =========================
 st.markdown("---")
 st.subheader("📊 Interactive Analytics (Dark Mode)")
 
+fig_line = None
+fig_pie = None
+fig_radar = None
+avg_total = None
+mean_crit = {}
+
 if st.session_state.scores:
-    # Line chart: total score over questions
+    # Line chart: score over time
     df_scores = pd.DataFrame({
         "Question #": list(range(1, len(st.session_state.scores) + 1)),
         "Score": st.session_state.scores
@@ -425,7 +435,7 @@ if st.session_state.scores:
     crit_df = pd.DataFrame(st.session_state.criteria_list)
     mean_crit = crit_df.mean(numeric_only=True).to_dict()
 
-    # Pie chart: composition of strengths (avg criteria)
+    # Pie chart: strength composition
     pie_df = pd.DataFrame({
         "Criterion": list(mean_crit.keys()),
         "Average": list(mean_crit.values())
@@ -440,35 +450,153 @@ if st.session_state.scores:
     )
     st.plotly_chart(fig_pie, use_container_width=True)
 
-    # Radar-like with Plotly (polar)
+    # Radar/polar
     fig_radar = go.Figure()
     cats = list(mean_crit.keys())
     vals = list(mean_crit.values())
-    # close the loop for radar
     cats_close = cats + [cats[0]]
     vals_close = vals + [vals[0]]
     fig_radar.add_trace(go.Scatterpolar(r=vals_close, theta=cats_close, fill='toself', name='Averages'))
-    fig_radar.update_layout(template=PLOTLY_TEMPLATE, title="Skill Radar (Avg Criteria)", polar=dict(radialaxis=dict(range=[0,10])))
+    fig_radar.update_layout(template=PLOTLY_TEMPLATE, title="Skill Radar", polar=dict(radialaxis=dict(range=[0,10])))
     st.plotly_chart(fig_radar, use_container_width=True)
 
-    # Summary badges
+    # Summary metrics
     avg_total = round(df_scores["Score"].mean(), 1)
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Avg Score", f"{avg_total}/10")
+    c1.metric("Average Score", f"{avg_total}/10")
     c2.metric("Correctness", f"{mean_crit.get('correctness', 0):.1f}/10")
     c3.metric("Clarity", f"{mean_crit.get('clarity', 0):.1f}/10")
     c4.metric("Relevance", f"{mean_crit.get('relevance', 0):.1f}/10")
     c5.metric("Depth", f"{mean_crit.get('depth', 0):.1f}/10")
 
-# Exports
+# =========================
+# PDF Report Generation
+# =========================
 st.markdown("---")
-st.subheader("📁 Export Report")
-exp_col1, exp_col2, exp_col3 = st.columns([1,1,2])
+st.subheader("📄 Generate Professional PDF Report")
+
+st.markdown(
+    "<div class='section-title'>Includes: candidate name, role & level, interviewer type, "
+    "average score, correctness, clarity, relevance, depth, and embedded charts.</div>",
+    unsafe_allow_html=True,
+)
+
+def generate_pdf_report(name, role, seniority, personality, avg_total, mean_crit, figs):
+    from fpdf import FPDF  # ensure imported in function scope for Streamlit
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    # Header
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(0, 10, "IntervAI Interview Report", ln=True, align="C")
+    pdf.ln(8)
+
+    # Candidate Info
+    pdf.set_font("Helvetica", "", 12)
+    pdf.cell(0, 8, f"Candidate Name: {name}", ln=True)
+    pdf.cell(0, 8, f"Role: {role} ({seniority})", ln=True)
+    pdf.cell(0, 8, f"Interviewer Type: {personality}", ln=True)
+    pdf.ln(5)
+
+    # Average Metrics
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 10, "Overall Evaluation:", ln=True)
+    pdf.set_font("Helvetica", "", 12)
+    pdf.cell(0, 8, f"Average Score: {avg_total}/10", ln=True)
+    pdf.cell(0, 8, f"Correctness: {mean_crit.get('correctness',0):.1f}/10", ln=True)
+    pdf.cell(0, 8, f"Clarity: {mean_crit.get('clarity',0):.1f}/10", ln=True)
+    pdf.cell(0, 8, f"Relevance: {mean_crit.get('relevance',0):.1f}/10", ln=True)
+    pdf.cell(0, 8, f"Depth: {mean_crit.get('depth',0):.1f}/10", ln=True)
+    pdf.ln(8)
+
+    # Save charts to temp files and embed
+    temp_files = []
+    for fig, title in figs:
+        # Save chart as PNG
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        fig.write_image(tmp.name)  # requires kaleido
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 8, title, ln=True)
+        pdf.image(tmp.name, w=180)
+        pdf.ln(6)
+        temp_files.append(tmp.name)
+
+    # Footer
+    pdf.set_font("Helvetica", "I", 10)
+    pdf.ln(6)
+    pdf.multi_cell(0, 6, "Generated by IntervAI — AI-powered interview assistant.\nhttps://github.com")
+
+    # Output
+    out_path = os.path.join(tempfile.gettempdir(), f"{name.replace(' ', '_')}_IntervAI_Report.pdf")
+    pdf.output(out_path)
+    return out_path, temp_files
+
+if st.button("🧾 Generate PDF Report"):
+    if not st.session_state.scores:
+        st.warning("No data available. Complete an interview first.")
+    else:
+        # Rebuild figures if needed
+        if avg_total is None or fig_line is None or fig_pie is None or fig_radar is None:
+            # compute metrics
+            df_scores = pd.DataFrame({"Question #": list(range(1, len(st.session_state.scores)+1)),
+                                      "Score": st.session_state.scores})
+            avg_total = round(df_scores["Score"].mean(), 1)
+            crit_df = pd.DataFrame(st.session_state.criteria_list)
+            mean_crit = crit_df.mean(numeric_only=True).to_dict()
+
+            # charts
+            fig_line = px.line(df_scores, x="Question #", y="Score", markers=True,
+                               template=PLOTLY_TEMPLATE, title="Performance Over Time")
+            fig_line.update_yaxes(range=[0,10])
+
+            pie_df = pd.DataFrame({"Criterion": list(mean_crit.keys()), "Average": list(mean_crit.values())})
+            fig_pie = px.pie(pie_df, names="Criterion", values="Average", hole=0.45,
+                             template=PLOTLY_TEMPLATE, title="Overall Strength Composition")
+
+            cats = list(mean_crit.keys())
+            vals = list(mean_crit.values())
+            cats_close = cats + [cats[0]]
+            vals_close = vals + [vals[0]]
+            fig_radar = go.Figure()
+            fig_radar.add_trace(go.Scatterpolar(r=vals_close, theta=cats_close, fill='toself', name='Averages'))
+            fig_radar.update_layout(template=PLOTLY_TEMPLATE, title="Skill Radar",
+                                    polar=dict(radialaxis=dict(range=[0,10])))
+
+        figs = [(fig_line, "Performance Over Time"),
+                (fig_pie, "Overall Strength Composition"),
+                (fig_radar, "Skill Radar")]
+
+        pdf_path, tmp_files = generate_pdf_report(
+            candidate_name, role, seniority, personality, avg_total, mean_crit, figs
+        )
+        with open(pdf_path, "rb") as f:
+            st.download_button(
+                "⬇️ Download Interview Report (PDF)",
+                f,
+                file_name=f"{candidate_name}_IntervAI_Report.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+        # Clean up temp images
+        for p in tmp_files:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+# =========================
+# JSON/CSV Exports (optional)
+# =========================
+st.markdown("---")
+st.subheader("📁 Export (CSV / JSON)")
+
+exp_col1, exp_col2 = st.columns(2)
 with exp_col1:
     if st.button("⬇️ Download CSV"):
         rows = []
         q_num = 0
-        # flatten conversation into Q/A pairs + feedback
         last_q = None
         for item in st.session_state.conversation:
             if item["role"] == "assistant" and not item["content"].startswith("**Feedback:**") and not item["content"].startswith("🎉"):
@@ -479,7 +607,7 @@ with exp_col1:
             elif item["role"] == "assistant" and item["content"].startswith("**Feedback:**") and rows:
                 rows[-1]["feedback_block"] = item["content"]
 
-        # add scores/criteria per question if available
+        # attach scores/criteria
         for i, r in enumerate(rows):
             if i < len(st.session_state.scores):
                 r["score"] = st.session_state.scores[i]
@@ -497,6 +625,7 @@ with exp_col1:
 with exp_col2:
     if st.button("⬇️ Download JSON"):
         export = {
+            "candidate_name": candidate_name,
             "role": role,
             "seniority": seniority,
             "personality": personality,
@@ -517,4 +646,4 @@ with exp_col2:
 
 # Footer
 st.markdown("---")
-st.caption("IntervAI • Smart. Fair. Human.  • Built with Streamlit, Gemini, and Plotly (dark mode).")
+st.caption("IntervAI • Smart. Fair. Human. • Built with Streamlit, Gemini, Plotly & Kaleido (dark mode).")
