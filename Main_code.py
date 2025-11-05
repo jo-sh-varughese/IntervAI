@@ -20,7 +20,7 @@ if not API_KEY:
     st.stop()
 
 genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-2.5-flash")
 
 # ------------------ Streamlit Setup ------------------
 st.set_page_config(page_title="IntervAI – AI Interviewer", page_icon="🤖", layout="wide")
