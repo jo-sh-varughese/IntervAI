@@ -7,9 +7,9 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 import speech_recognition as sr
-import pyttsx3
 from fpdf import FPDF
 import matplotlib.pyplot as plt
+import platform
 
 # ------------------ Load API Key ------------------
 load_dotenv()
@@ -20,25 +20,27 @@ if not API_KEY:
     st.stop()
 
 genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 # ------------------ Streamlit Setup ------------------
-st.set_page_config(page_title="IntervAI: AI Job Interviewer Pro", page_icon="🤖", layout="wide")
-st.title("🤖 AI Job Interviewer Pro (Gemini Powered)")
-st.caption("Adaptive AI interviews with resume analysis, scoring, voice I/O, and reporting.")
+st.set_page_config(page_title="IntervAI – AI Interviewer", page_icon="🤖", layout="wide")
+st.title("🤖 IntervAI — The Intelligent Job Interviewer")
+st.caption("Adaptive, voice-ready AI interviews powered by Google Gemini, Streamlit, and Python.")
 
-# ------------------ Sidebar ------------------
-st.sidebar.header("Interview Configuration")
+# ------------------ Sidebar Configuration ------------------
+st.sidebar.header("🎯 Interview Configuration")
 role = st.sidebar.text_input("Job Role", "AI Engineer")
 seniority = st.sidebar.selectbox("Seniority Level", ["Intern", "Junior", "Mid-level", "Senior", "Lead"])
 personality = st.sidebar.selectbox("Interviewer Type", ["Technical", "HR", "Culture"])
-jd = st.sidebar.text_area("Job Description / Focus Areas",
-    "Responsible for building AI models; requires Python, ML, NLP, and LLM experience.")
+jd = st.sidebar.text_area(
+    "Job Description / Focus Areas",
+    "Responsible for developing and deploying AI models. Requires Python, ML, NLP, and LLM experience."
+)
 temperature = st.sidebar.slider("Creativity", 0.0, 1.0, 0.4, 0.05)
 max_questions = st.sidebar.slider("Max Questions", 3, 10, 5)
 
 # ------------------ Resume Upload ------------------
-uploaded_file = st.sidebar.file_uploader("Upload Candidate Resume (PDF)", type=["pdf"])
+uploaded_file = st.sidebar.file_uploader("📄 Upload Candidate Resume (PDF)", type=["pdf"])
 resume_text = ""
 if uploaded_file is not None:
     reader = PdfReader(uploaded_file)
@@ -46,7 +48,7 @@ if uploaded_file is not None:
         resume_text += page.extract_text()
     st.sidebar.success("✅ Resume uploaded successfully!")
 else:
-    st.sidebar.info("Upload a PDF resume to personalize questions.")
+    st.sidebar.info("Upload a PDF resume to personalize interview questions.")
 
 # ------------------ Session State ------------------
 if "conversation" not in st.session_state:
@@ -58,24 +60,41 @@ if "interview_done" not in st.session_state:
 if "question_count" not in st.session_state:
     st.session_state.question_count = 0
 
-# ------------------ Voice Setup (Thread Safe) ------------------
-engine = pyttsx3.init()
-engine.setProperty('rate', 165)
+# ------------------ Voice Setup (Cloud-Safe) ------------------
+ENABLE_VOICE = True
+try:
+    # Disable voice in Streamlit Cloud or limited environments
+    if "streamlit" in platform.node().lower() or os.environ.get("STREAMLIT_RUNTIME"):
+        ENABLE_VOICE = False
+        st.sidebar.info("🔇 Voice output disabled (cloud environment).")
+    else:
+        import pyttsx3
+        engine = pyttsx3.init()
+        engine.setProperty('rate', 165)
 
-def speak(text):
-    """Streamlit-safe threaded TTS"""
-    def _speak():
-        try:
-            engine.say(text)
-            engine.runAndWait()
-        except RuntimeError:
-            pass  # Ignore "loop already started"
-    threading.Thread(target=_speak, daemon=True).start()
+        def speak(text):
+            """Run TTS safely in a separate thread."""
+            def _speak():
+                try:
+                    engine.say(text)
+                    engine.runAndWait()
+                except RuntimeError:
+                    pass
+            threading.Thread(target=_speak, daemon=True).start()
+except Exception as e:
+    ENABLE_VOICE = False
+    st.sidebar.warning(f"Voice disabled: {e}")
 
+# Fallback for cloud
+if not ENABLE_VOICE:
+    def speak(text):
+        pass
+
+# ------------------ Speech Recognition ------------------
 r = sr.Recognizer()
 
 def listen():
-    """Capture spoken input"""
+    """Capture voice answer."""
     with sr.Microphone() as source:
         st.info("🎙️ Listening... please speak your answer")
         audio = r.listen(source, timeout=5, phrase_time_limit=30)
@@ -84,28 +103,28 @@ def listen():
         st.success(f"🗣️ You said: {text}")
         return text
     except sr.UnknownValueError:
-        st.warning("⚠️ Could not understand your speech. Please try again.")
+        st.warning("⚠️ Could not understand your speech.")
         return ""
     except sr.RequestError:
-        st.error("⚠️ Speech recognition service unavailable.")
+        st.error("⚠️ Speech recognition unavailable.")
         return ""
 
 # ------------------ System Prompt ------------------
 SYSTEM_PROMPT = f"""
-You are an expert {personality} interviewer for AI and software roles.
+You are an expert {personality} interviewer for AI and technical roles.
 Conduct a realistic, adaptive interview.
 
 Rules:
 1. Ask one question at a time.
-2. Use the candidate's resume (if given) to make relevant questions.
-3. Increase difficulty if answers are strong, or simplify if weak.
-4. Focus on reasoning, experience, and personality fit.
-5. Be concise and professional (<60 words per question).
-6. Never repeat questions.
+2. Use the candidate's resume (if given) for personalized questions.
+3. Adjust difficulty dynamically.
+4. Be concise, insightful, and professional.
+5. Never repeat questions.
 """
 
 # ------------------ Core Logic ------------------
 def generate_question(role, seniority, jd, history, resume_text):
+    """Generate the next dynamic interview question."""
     context = f"Role: {role} ({seniority}). JD: {jd}. Resume: {resume_text[:1500]}"
     conversation_text = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
     prompt = f"""{SYSTEM_PROMPT}
@@ -122,6 +141,7 @@ Return only the question text.
     return response.text.strip()
 
 def evaluate_answer(question, answer, role, seniority, jd):
+    """Evaluate candidate’s answer and provide feedback."""
     prompt = f"""
 You are evaluating a candidate's answer for a {role} ({seniority}) position.
 Job Description: {jd}
@@ -129,17 +149,17 @@ Job Description: {jd}
 Question: {question}
 Answer: {answer}
 
-Rate from 0-10 on correctness, clarity, and relevance.
+Rate from 0-10 for correctness, clarity, and relevance.
 Return JSON: {{"score": <number>, "feedback": "<short feedback>"}}.
 """
     response = model.generate_content(prompt, generation_config={"temperature": 0})
     try:
         result = json.loads(response.text.strip())
     except Exception:
-        result = {"score": 5, "feedback": "Could not parse JSON properly."}
+        result = {"score": 5, "feedback": "Could not parse evaluation."}
     return result
 
-# ------------------ Main Flow ------------------
+# ------------------ Main Interview Flow ------------------
 if not st.session_state.interview_done:
     if st.session_state.question_count == 0:
         if st.button("Start Interview ▶️"):
@@ -178,7 +198,7 @@ if not st.session_state.interview_done:
                 speak(next_q)
             else:
                 st.session_state.conversation.append(
-                    {"role": "assistant", "content": "Thank you for the interview! We'll get back to you soon."}
+                    {"role": "assistant", "content": "🎉 Thank you for the interview! We'll get back to you soon."}
                 )
                 st.session_state.interview_done = True
             st.rerun()
@@ -186,7 +206,7 @@ if not st.session_state.interview_done:
 else:
     st.success("✅ Interview completed!")
 
-    # 📊 Scoring Dashboard
+    # 📊 Dashboard
     if st.session_state.scores:
         avg_score = sum(st.session_state.scores) / len(st.session_state.scores)
         st.metric("Average Score", f"{avg_score:.1f}/10")
@@ -198,7 +218,7 @@ else:
         ax.set_ylabel("Score")
         st.pyplot(fig)
 
-    # 🗂️ Export Report
+    # 🗂️ Export Options
     export_choice = st.radio("📤 Export Report As:", ["None", "CSV", "PDF"])
     if export_choice == "CSV":
         df = pd.DataFrame(st.session_state.conversation)
