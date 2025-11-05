@@ -18,6 +18,9 @@ from PyPDF2 import PdfReader
 # Plotly (interactive, dark theme) + static export via kaleido
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
+pio.kaleido.scope.chromium_args = ("--no-sandbox", "--disable-dev-shm-usage")
+
 
 # Optional: voice input (works locally; typically disabled in cloud)
 try:
